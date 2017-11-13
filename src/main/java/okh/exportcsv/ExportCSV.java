@@ -73,9 +73,6 @@ public class ExportCSV {
             hf.printHelp("ExportCSV", options);
             return;
         }
-        for (String t : cmd.getOptionValues("tables")) {
-            System.out.println("table=" + t);
-        }
         ExportCSV exportCSV = new ExportCSV(cmd);
         try {
             exportCSV.run();
@@ -161,8 +158,9 @@ public class ExportCSV {
         }
         else
             zip = null;
+        long t1 = System.currentTimeMillis(), bytes = 0;
         for (String table : tables) {
-            outputCSV(table);
+            bytes += outputCSV(table);
         }
         db.close();
         outputBatchFile(tables);
@@ -172,12 +170,14 @@ public class ExportCSV {
         if (sevenZip != null) {
             sevenZip.close();
         }
+        t1 = System.currentTimeMillis() - t1;
+        System.out.println(tables.length + "テーブル、合計" + formatSize(bytes) + "のCSVファイルを"+ df.format(t1/1000) + "秒で出力しました。" + formatSize(bytes/(t1/1000)) + "/sec");
     }
     static final String CRLF = System.lineSeparator();
     static final DecimalFormat df = new DecimalFormat("#,##0");
     static final DecimalFormat df2 = new DecimalFormat("#,##0.00%");
-    void outputCSV(String table) throws SQLException, IOException {
-        long rowCount = 0;
+    long outputCSV(String table) throws SQLException, IOException {
+        long rowCount = 0, bytes = 0;
         PreparedStatement stmt;
         stmt = db.prepareStatement("select count(*) from " + table);
         try (ResultSet rs = stmt.executeQuery()) {
@@ -213,7 +213,7 @@ public class ExportCSV {
                 fw = new FileOutputStream(file);
             }
             StringBuilder w = new StringBuilder(1024*100);
-            long row = 0, total = 0, bytes = 0;
+            long row = 0, total = 0;
             while (rs.next()) {
                 ++row;
                 ++total;
@@ -247,7 +247,7 @@ public class ExportCSV {
                 System.out.println(table + ": " + df.format(row / (interval / 1000)) + " 行/秒 " + df2.format(rowCount != 0 ? (double)total / rowCount : 100));
             }
             t1 = System.currentTimeMillis() - t2;
-            System.out.println(table + ": 合計 " + total + " 行 (" + df.format(bytes) + "バイト) を " + (t1/1000) + "秒で出力しました。" + df.format(bytes/(t1/1000)) + "byte/sec");
+            System.out.println(table + ": 合計 " + df.format(total) + " 行 (" + formatSize(bytes) + ") を " + (t1/1000) + "秒で出力しました。" + formatSize((bytes)/(t1/1000)) + "/sec");
             if (zip != null) {
                 zip.closeArchiveEntry();
             }
@@ -258,6 +258,7 @@ public class ExportCSV {
                 if (fw != null) fw.close();
             }
         }
+        return bytes;
     }
 
     void outputControlFile(String table, ResultSetMetaData meta) throws IOException, SQLException {
@@ -344,5 +345,17 @@ public class ExportCSV {
             if (sw != null) sevenZip.write(sw.toString().getBytes());
             sevenZip.closeArchiveEntry();;
         }
+    }
+    static String formatSize(long size) {
+        if (size < 10000) {
+            return df.format(size) + "byte";
+        }
+        if (size / 1024 < 10000) {
+            return df.format(size / 1024) + "KB";
+        }
+        if (size / 1024 / 1024 < 10000) {
+            return df.format(size / 1024 / 1024) + "MB";
+        }
+        return df.format(size / 1024 / 1024 / 1024) + "GB";
     }
 }
