@@ -12,11 +12,6 @@
             <version>1.4</version>
         </dependency>
         <dependency>
-            <groupId>com.jslsolucoes</groupId>
-            <artifactId>ojdbc6</artifactId>
-            <version>11.2.0.1.0</version>
-        </dependency>
-        <dependency>
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-compress</artifactId>
             <version>1.15</version>
@@ -25,6 +20,11 @@
             <groupId>org.tukaani</groupId>
             <artifactId>xz</artifactId>
             <version>1.6</version>
+        </dependency>
+        <dependency>
+            <groupId>com.oracle.jdbc</groupId>
+            <artifactId>ojdbc6</artifactId>
+            <version>11.2.0.3</version>
         </dependency>
     </dependencies>
     <properties>

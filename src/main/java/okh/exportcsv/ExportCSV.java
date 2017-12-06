@@ -14,12 +14,19 @@ import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.sql.Connection;
+import java.sql.Date;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.text.DecimalFormat;
+import java.text.SimpleDateFormat;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.apache.commons.cli.CommandLine;
@@ -61,7 +68,8 @@ public class ExportCSV {
         options.addOption("z", "zipfile", true, "出力ファイル(CSV,CTL,BAT)を格納するZIPファイル名");
         options.addOption("7", "7zfile", true, "出力ファイル(CSV,CTL,BAT)を格納する7zファイル名");
         options.addOption("c", "compresslevel", true, "ZIP圧縮レベル(1-9)");
-        options.addOption(Option.builder("t").longOpt("tables").desc("テーブル名を,で区切って複数指定").hasArgs().valueSeparator(',').required().build());
+        options.addOption(Option.builder("t").longOpt("tables").desc("テーブル名を,で区切って複数指定(指定なしなら全テーブル)").hasArgs().valueSeparator(',').build());
+        options.addOption(Option.builder("x").longOpt("exclude").desc("除外するテーブル名のパターン(LIKE形式)").hasArgs().valueSeparator(',').build());
         CommandLineParser parser = new DefaultParser();
         CommandLine cmd;
         try {
@@ -86,6 +94,7 @@ public class ExportCSV {
     String user;
     String password;
     String[] tables;
+    String[] excludes;
     Connection db;
     int outputBufferSize;
     int fetchSize;
@@ -107,6 +116,7 @@ public class ExportCSV {
         user = cmd.getOptionValue("user");
         password = cmd.getOptionValue("password");
         tables = cmd.getOptionValues("tables");
+        excludes = cmd.getOptionValues("exclude");
         outputBufferSize = 65536;
         try {
             if (cmd.hasOption("outputbuffersize")) {
@@ -142,7 +152,16 @@ public class ExportCSV {
     SevenZOutputFile sevenZip;
     void run() throws ClassNotFoundException, SQLException, IOException {
         Class.forName("oracle.jdbc.driver.OracleDriver");
-        db = DriverManager.getConnection("jdbc:oracle:thin:@" + host + ":" + port + ":" + sid, user, password);
+        try {
+            db = DriverManager.getConnection("jdbc:oracle:thin:@" + host + ":" + port + ":" + sid, user, password);
+        }
+        catch (SQLException e) {
+            System.out.println("ログインに失敗しました。");
+            return;
+        }
+        if (tables == null) {
+            tables = getAllTables();
+        }
         System.out.println("zipname=" + zipName);
         if (zipName != null) {
             File file = new File(zipName);
@@ -158,24 +177,34 @@ public class ExportCSV {
         }
         else
             zip = null;
-        long t1 = System.currentTimeMillis(), bytes = 0;
+        long t1 = System.currentTimeMillis(), bytes = 0, b = 0;
+        List<String> tableList = new ArrayList<>();
         for (String table : tables) {
-            bytes += outputCSV(table);
+            b = outputCSV(table);
+            if (b == -1) break;
+            bytes += b;
+            if (b > 0) tableList.add(table);
         }
         db.close();
-        outputBatchFile(tables);
+        tables = (String[]) tableList.toArray(new String[tableList.size()]);
+        if (bytes != 0) outputBatchFile(tables);
         if (zip != null) {
             zip.close();
         }
         if (sevenZip != null) {
             sevenZip.close();
         }
-        t1 = System.currentTimeMillis() - t1;
-        System.out.println(tables.length + "テーブル、合計" + formatSize(bytes) + "のCSVファイルを"+ df.format(t1/1000) + "秒で出力しました。" + formatSize(bytes/(t1/1000)) + "/sec");
+        t1 = (System.currentTimeMillis() - t1) / 1000;
+        if (t1 != 0)
+            System.out.println(tables.length + "テーブル、合計" + formatSize(bytes) + "のCSVファイルを"+ formatSecond(t1) + "で出力しました。" + formatSize(bytes/t1) + "/sec");
+        else
+            System.out.println(tables.length + "テーブル、合計" + formatSize(bytes) + "のCSVファイルを"+ formatSecond(t1) + "で出力しました。");
     }
     static final String CRLF = System.lineSeparator();
-    static final DecimalFormat df = new DecimalFormat("#,##0");
-    static final DecimalFormat df2 = new DecimalFormat("#,##0.00%");
+    static final DecimalFormat NUMBER_FORMAT = new DecimalFormat("#,##0");
+    static final DecimalFormat PERCENT_FORMAT = new DecimalFormat("#,##0.00%");
+    static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");
+    static final DateTimeFormatter TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss.SSS");
     long outputCSV(String table) throws SQLException, IOException {
         long rowCount = 0, bytes = 0;
         PreparedStatement stmt;
@@ -183,7 +212,17 @@ public class ExportCSV {
         try (ResultSet rs = stmt.executeQuery()) {
             if (rs.next()) {
                 rowCount = rs.getLong(1);
-                System.out.println(table + " " + df.format(rowCount) + " 行");
+                System.out.println(table + " " + NUMBER_FORMAT.format(rowCount) + " 行");
+                if (rowCount == 0) {
+                    stmt.close();
+                    return 0;
+                }
+            }
+        } catch (SQLException e) {
+            if (e.getMessage().contains("ORA-00942")) {
+                System.out.println(table + " テーブルは存在しません。処理を中止します。");
+                stmt.close();
+                return -1;
             }
         }
 
@@ -195,6 +234,9 @@ public class ExportCSV {
             ResultSetMetaData meta = rs.getMetaData();
             outputControlFile(table, meta);
             int colcount = meta.getColumnCount();
+//            for (int i = 1; i <= colcount; i++) {
+//                System.out.println(meta.getColumnName(i) + ": " + meta.getColumnTypeName(i) + "(" + meta.getColumnType(i) + ")");
+//            }
             String data;
             
             File file = new File(table + ".csv");
@@ -218,8 +260,29 @@ public class ExportCSV {
                 ++row;
                 ++total;
                 for (int i = 1; i <= colcount; i++) {
-                    data = rs.getString(i);
-                    data = rs.wasNull() ? "" : data.replace("\"", "\"\"");
+                    if (meta.getColumnTypeName(i).equals("DATE")) {
+                        Date dt = rs.getDate(i);
+                        data = dt != null ? DATE_FORMAT.format(dt) : "";
+                    }
+                    else if (meta.getColumnTypeName(i).equals("TIMESTAMP")) {
+                        Timestamp ts = rs.getTimestamp(i);
+                        if (ts != null) {
+                            LocalDateTime ldt = ts.toLocalDateTime();
+                            data = TIMESTAMP_FORMAT.format(ldt);
+                        }
+                        else data = "";
+                    }
+                    else {
+                        try {
+                            data = rs.getString(i).replace("\"", "\"\"");
+                        } catch (NullPointerException e) {
+                            data = "";
+                        }
+                        if ("005896".equals(data)) {
+                            data = data;
+                        }
+                    }
+                    //data = rs.wasNull() ? "" : data.replace("\"", "\"\"");
                     if (i > 1) {
                         w.append(',');
                     }
@@ -235,7 +298,7 @@ public class ExportCSV {
                 }
                 if (t1 + interval < System.currentTimeMillis()) {
                     t1 += interval;
-                    System.out.println(table + ": " + df.format(row / (interval / 1000)) + " 行/秒 " + df2.format(rowCount != 0 ? (double)total / rowCount : 100));
+                    System.out.println("  " + table + ": " + NUMBER_FORMAT.format(row / (interval / 1000)) + " 行/秒 " + PERCENT_FORMAT.format(rowCount != 0 ? (double)total / rowCount : 100));
                     row = 0;
                 }
             }
@@ -244,10 +307,13 @@ public class ExportCSV {
                 if (fw != null) fw.write(rec);
                 bytes += rec.length;
                 w.setLength(0);
-                System.out.println(table + ": " + df.format(row / (interval / 1000)) + " 行/秒 " + df2.format(rowCount != 0 ? (double)total / rowCount : 100));
+                System.out.println("  " + table + ": " + NUMBER_FORMAT.format(row / (interval / 1000)) + " 行/秒 " + PERCENT_FORMAT.format(rowCount != 0 ? (double)total / rowCount : 100));
             }
-            t1 = System.currentTimeMillis() - t2;
-            System.out.println(table + ": 合計 " + df.format(total) + " 行 (" + formatSize(bytes) + ") を " + (t1/1000) + "秒で出力しました。" + formatSize((bytes)/(t1/1000)) + "/sec");
+            t1 = (System.currentTimeMillis() - t2) / 1000;
+            if (t1 != 0)
+                System.out.println(table + ": 合計 " + NUMBER_FORMAT.format(total) + " 行 (" + formatSize(bytes) + ") を " + formatSecond(t1) + "で出力しました。" + formatSize(bytes/t1) + "/sec");
+            else
+                System.out.println(table + ": 合計 " + NUMBER_FORMAT.format(total) + " 行 (" + formatSize(bytes) + ") を " + formatSecond(t1) + "で出力しました。");
             if (zip != null) {
                 zip.closeArchiveEntry();
             }
@@ -258,6 +324,7 @@ public class ExportCSV {
                 if (fw != null) fw.close();
             }
         }
+        stmt.close();
         return bytes;
     }
 
@@ -280,9 +347,18 @@ public class ExportCSV {
         w.append('(');
         for (int i = 1; i <= meta.getColumnCount(); i++) {
             if (i > 1) {
-                w.append(',');
+                w.append(',').append(CRLF);
             }
-            w.append(meta.getColumnName(i));
+            if (meta.getColumnTypeName(i).equals("DATE")) {
+                w.append(meta.getColumnName(i)).append(" date 'yyyy/MM/dd HH24:mi:ss'");
+            }
+            else if (meta.getColumnTypeName(i).equals("TIMESTAMP")) {
+                w.append(meta.getColumnName(i)).append(" timestamp 'yyyy/MM/dd HH24:mi:ss.ff3'");
+            }
+            else {
+                w.append(meta.getColumnName(i));
+            }
+            
         }
         w.append(')');
         w.append(CRLF);
@@ -327,7 +403,8 @@ public class ExportCSV {
         for (String table : tables) {
             w.append("del ").append(table).append(".bad>nul 2>&1").println();
             w.append("sqlldr %1 control=").append(table).append(".ctl").println();
-            w.append("if exist ").append(table).append(".bad ( echo ").append(table).append("のロードに失敗しました。 && exit /b 1 ) else ( echo ").append(table).append("のロードに成功しました。 )").println();
+            w.append("if errorlevel 1 ( echo ").append(table).append("のロードに失敗しました。 && pause ) else ")
+             .append("if exist ").append(table).append(".bad ( echo ").append(table).append("のロードに失敗しました。 && pause ) else ( echo ").append(table).append("のロードに成功しました。 )").println();
         }
         w.println("exit /b 0");
         w.flush();
@@ -348,14 +425,47 @@ public class ExportCSV {
     }
     static String formatSize(long size) {
         if (size < 10000) {
-            return df.format(size) + "byte";
+            return NUMBER_FORMAT.format(size) + "byte";
         }
         if (size / 1024 < 10000) {
-            return df.format(size / 1024) + "KB";
+            return NUMBER_FORMAT.format(size / 1024) + "KB";
         }
         if (size / 1024 / 1024 < 10000) {
-            return df.format(size / 1024 / 1024) + "MB";
+            return NUMBER_FORMAT.format(size / 1024 / 1024) + "MB";
         }
-        return df.format(size / 1024 / 1024 / 1024) + "GB";
+        return NUMBER_FORMAT.format(size / 1024 / 1024 / 1024) + "GB";
+    }
+    
+    static String formatSecond(long sec) {
+        long min = sec/60;
+        sec = sec-min*60;
+        
+        return sec != 0 ? min + "分" + sec + "秒" : min + "分";
+    }
+    
+    String[] getAllTables() throws SQLException {
+        StringBuilder sql = new StringBuilder();
+        sql.append("select table_name from user_tables ");
+        if (excludes.length > 0) {
+            sql.append("where ");
+            for (int i = 0; i < excludes.length; i++) {
+                if (i > 0) sql.append("and ");
+                sql.append("table_name not like ? ");
+            }
+        }
+        sql.append("order by 1");
+        List<String> list = new ArrayList<>();
+        PreparedStatement stmt;
+        stmt = db.prepareStatement(sql.toString());
+        for (int i = 0; i < excludes.length; i++) {
+            stmt.setString(i+1, excludes[i]);
+        }
+        try (ResultSet rs = stmt.executeQuery()) {
+            while (rs.next()) {
+                list.add(rs.getString(1));
+                System.out.println(rs.getString(1));
+            }
+        }
+        return list.isEmpty() ? null : list.toArray(new String[list.size()]);
     }
 }
