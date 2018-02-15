@@ -37,8 +37,6 @@ import org.apache.commons.cli.MissingOptionException;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
-import org.apache.commons.compress.archivers.sevenz.SevenZMethod;
-import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 
@@ -66,7 +64,6 @@ public class ExportCSV {
         options.addOption("m", "insertmode", true, "SQL*Loaderのinsertモード(デフォルトはtruncate)");
         options.addOption("o", "options", true, "SQL*LoaderのコントロールファイルのOPTIONSに指定するオプション。\n例:direct=true,multithreading=true");
         options.addOption("z", "zipfile", true, "出力ファイル(CSV,CTL,BAT)を格納するZIPファイル名");
-        options.addOption("7", "7zfile", true, "出力ファイル(CSV,CTL,BAT)を格納する7zファイル名");
         options.addOption("c", "compresslevel", true, "ZIP圧縮レベル(1-9)");
         options.addOption(Option.builder("t").longOpt("tables").desc("テーブル名を,で区切って複数指定(指定なしなら全テーブル)").hasArgs().valueSeparator(',').build());
         options.addOption(Option.builder("x").longOpt("exclude").desc("除外するテーブル名のパターン(LIKE形式)").hasArgs().valueSeparator(',').build());
@@ -101,7 +98,6 @@ public class ExportCSV {
     String mode;
     String options;
     String zipName;
-    String sevenZipName;
     int compressLevel;
     ExportCSV(CommandLine cmd) {
         host = cmd.getOptionValue("host");
@@ -138,7 +134,6 @@ public class ExportCSV {
         }
         options = cmd.getOptionValue("options");
         zipName = cmd.getOptionValue("zipfile");
-        sevenZipName = cmd.getOptionValue("7zfile");
         compressLevel = 5;
         if (cmd.hasOption("compresslevel")) {
             try {
@@ -149,7 +144,6 @@ public class ExportCSV {
     }
 
     ZipArchiveOutputStream zip;
-    SevenZOutputFile sevenZip;
     void run() throws ClassNotFoundException, SQLException, IOException {
         Class.forName("oracle.jdbc.driver.OracleDriver");
         try {
@@ -169,12 +163,6 @@ public class ExportCSV {
             zip = new ZipArchiveOutputStream(file);
             zip.setLevel(compressLevel);
         }
-        else if (sevenZipName != null) {
-            File file = new File(sevenZipName);
-            if (file.exists()) file.delete();
-            sevenZip = new SevenZOutputFile(file);
-            sevenZip.setContentCompression(SevenZMethod.LZMA2);
-        }
         else
             zip = null;
         long t1 = System.currentTimeMillis(), bytes = 0, b = 0;
@@ -190,9 +178,6 @@ public class ExportCSV {
         if (bytes != 0) outputBatchFile(tables);
         if (zip != null) {
             zip.close();
-        }
-        if (sevenZip != null) {
-            sevenZip.close();
         }
         t1 = (System.currentTimeMillis() - t1) / 1000;
         if (t1 != 0)
@@ -234,9 +219,6 @@ public class ExportCSV {
             ResultSetMetaData meta = rs.getMetaData();
             outputControlFile(table, meta);
             int colcount = meta.getColumnCount();
-//            for (int i = 1; i <= colcount; i++) {
-//                System.out.println(meta.getColumnName(i) + ": " + meta.getColumnTypeName(i) + "(" + meta.getColumnType(i) + ")");
-//            }
             String data;
             
             File file = new File(table + ".csv");
@@ -244,9 +226,6 @@ public class ExportCSV {
             if (zip != null) {
                 zip.putArchiveEntry(new ZipArchiveEntry(file.getName()));
                 fw = zip;
-            }
-            else if (sevenZip != null) {
-                sevenZip.putArchiveEntry(sevenZip.createArchiveEntry(file, file.getName()));
             }
             else {
                 if (file.exists()) {
@@ -278,9 +257,6 @@ public class ExportCSV {
                         } catch (NullPointerException e) {
                             data = "";
                         }
-                        if ("005896".equals(data)) {
-                            data = data;
-                        }
                     }
                     //data = rs.wasNull() ? "" : data.replace("\"", "\"\"");
                     if (i > 1) {
@@ -291,8 +267,7 @@ public class ExportCSV {
                 w.append(CRLF);
                 if (w.length() > 1024*99) {
                     byte[] rec = w.toString().getBytes();
-                    if (sevenZip != null) sevenZip.write(rec);
-                    else fw.write(rec);
+                    fw.write(rec);
                     bytes += rec.length;
                     w.setLength(0);
                 }
@@ -316,9 +291,6 @@ public class ExportCSV {
                 System.out.println(table + ": 合計 " + NUMBER_FORMAT.format(total) + " 行 (" + formatSize(bytes) + ") を " + formatSecond(t1) + "で出力しました。");
             if (zip != null) {
                 zip.closeArchiveEntry();
-            }
-            else if (sevenZip != null) {
-                sevenZip.closeArchiveEntry();
             }
             else {
                 if (fw != null) fw.close();
@@ -369,11 +341,6 @@ public class ExportCSV {
             zip.write(w.toString().getBytes());
             zip.closeArchiveEntry();
         }
-        else if (sevenZip != null) {
-            sevenZip.putArchiveEntry(sevenZip.createArchiveEntry(file, file.getName()));
-            sevenZip.write(w.toString().getBytes());
-            sevenZip.closeArchiveEntry();
-        }
         else {
             if (file.exists()) {
                 file.delete();
@@ -388,7 +355,7 @@ public class ExportCSV {
         File file = new File(BAT_FILE_NAME);
         StringWriter sw = null;
         PrintWriter w;
-        if (zip == null && sevenZip == null) {
+        if (zip == null) {
             if (file.exists()) {
                 file.delete();
             }
@@ -415,12 +382,6 @@ public class ExportCSV {
             zip.putArchiveEntry(new ZipArchiveEntry(BAT_FILE_NAME));
             if (sw != null) zip.write(sw.toString().getBytes());
             zip.closeArchiveEntry();;
-        }
-        else if (sevenZip != null) {
-            file = new File(BAT_FILE_NAME);
-            sevenZip.putArchiveEntry(sevenZip.createArchiveEntry(file, file.getName()));
-            if (sw != null) sevenZip.write(sw.toString().getBytes());
-            sevenZip.closeArchiveEntry();;
         }
     }
     static String formatSize(long size) {
